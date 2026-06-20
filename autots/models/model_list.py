@@ -52,6 +52,7 @@ all_models = [
     "MambaSSM",
     "pMLP",
     "TVAModel",
+    "Chronos2",
 ]
 # used for graphing, not for model selection
 model_classes = {
@@ -107,6 +108,7 @@ model_classes = {
     "MambaSSM": "DL",
     "pMLP": "DL",
     "TVAModel": "DL",
+    "Chronos2": "DL",
 }
 all_pragmatic = list(
     (
@@ -258,6 +260,7 @@ gpu = [
     "MambaSSM",
     "pMLP",
     "TVAModel",
+    "Chronos2",
 ]
 # models with model-based upper/lower forecasts
 probabilistic = [
@@ -290,6 +293,7 @@ probabilistic = [
     # "PreprocessingExperts",
     # "MambaSSM",  # insanely slow
     "pMLP",
+    "Chronos2",
 ]
 # models that use the shared information of multiple series to improve accuracy
 multivariate = [
@@ -318,6 +322,7 @@ multivariate = [
     "TVVAR",
     "BallTreeRegressionMotif",
     "TVAModel",
+    "Chronos2",
 ]
 univariate = list((set(all_models) - set(multivariate)) - set(experimental))
 # USED IN AUTO_MODEL, models with no parameters
@@ -416,6 +421,7 @@ regressor = [
     "BallTreeRegressionMotif",
     "MambaSSM",
     "pMLP",
+    "Chronos2",
 ]
 motifs = [
     'UnivariateMotif',

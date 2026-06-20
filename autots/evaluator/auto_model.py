@@ -632,6 +632,18 @@ def ModelMonster(
             n_jobs=n_jobs,
             **parameters,
         )
+    elif model in ["Chronos2", "Chronos-2", "chronos2"]:
+        from autots.models.chronos import Chronos2
+
+        return Chronos2(
+            frequency=frequency,
+            forecast_length=forecast_length,
+            prediction_interval=prediction_interval,
+            random_seed=random_seed,
+            verbose=verbose,
+            n_jobs=n_jobs,
+            **parameters,
+        )
     elif model in ["NeuralForecast", "neuralforecast"]:
         from autots.models.neural_forecast import NeuralForecast
 
