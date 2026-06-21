@@ -13,6 +13,34 @@ import pandas as pd
 from autots.models.base import ModelObject, PredictionObject
 
 
+# Module-level cache of loaded pipelines, keyed by (model_name, device, dtype).
+# from_pretrained re-deserializes weights and re-transfers them onto the device
+# on every call, which is wasteful when the same model is fit repeatedly (e.g.
+# across AutoTS validation splits/generations), so memoize the pipeline here.
+_PIPELINE_CACHE = {}
+
+
+def _load_pipeline(model_name, device, dtype):
+    """Return a cached Chronos2Pipeline, loading it once per (model, device, dtype)."""
+    key = (model_name, device, str(dtype))
+    pipeline = _PIPELINE_CACHE.get(key)
+    if pipeline is None:
+        try:
+            from chronos import Chronos2Pipeline
+        except ImportError:
+            raise ImportError(
+                "Chronos2 requires the chronos-forecasting package. "
+                "Install it with `pip install chronos-forecasting`."
+            )
+        pipeline = Chronos2Pipeline.from_pretrained(
+            model_name,
+            device_map=device,
+            dtype=dtype,
+        )
+        _PIPELINE_CACHE[key] = pipeline
+    return pipeline
+
+
 class Chronos2(ModelObject):
     """Chronos-2 pretrained zero-shot forecasting model.
 
@@ -94,18 +122,11 @@ class Chronos2(ModelObject):
                 to df.index, used when regression_type == "User".
         """
         df = self.basic_profile(df)
-        try:
-            from chronos import Chronos2Pipeline
-        except ImportError:
-            raise ImportError(
-                "Chronos2 requires the chronos-forecasting package. "
-                "Install it with `pip install chronos-forecasting`."
-            )
 
-        self.pipeline = Chronos2Pipeline.from_pretrained(
+        self.pipeline = _load_pipeline(
             self.model_name,
-            device_map=self._resolve_device(),
-            dtype=self.torch_dtype,
+            self._resolve_device(),
+            self.torch_dtype,
         )
         self.df_train = df
 
