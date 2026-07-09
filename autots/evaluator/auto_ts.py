@@ -22,6 +22,10 @@ from autots.tools.shaping import (
     freq_to_timedelta,
 )
 from autots.tools.transform import GeneralTransformer, RandomTransform
+from autots.evaluator.genetic_operators import (
+    resolve_genetic_params,
+    compute_generation_progress,
+)
 from autots.evaluator.auto_model import (
     TemplateEvalObject,
     NewGeneticTemplate,
@@ -163,6 +167,18 @@ class AutoTS(object):
         custom metric (callable): a function to generate a custom metric. Expects func(A, F, df_train, prediction_interval) where the first three are np arrays of wide style 2d.
         verbose (int): setting to 0 or lower should reduce most output. Higher numbers give more output.
         n_jobs (int): Number of cores available to pass to parallel processing. A joblib context manager can be used instead (pass None in this case). Also 'auto'.
+        genetic_params (dict): options controlling the genetic template search between generations. Any subset of keys may be given:
+            'mutation' (default True) locally perturbs numeric parameters of surviving models, confined to the value range each
+            model's own parameter sampler produces so a mutated model is never slower than random search would itself have tried,
+            'mutation_probability' (default 0.3) the chance a given child receives that perturbation,
+            'anneal' (default True) favors fresh random parents early in the run and elite parents late,
+            'surrogate' (default False) generates 'surrogate_oversample' (default 3) times more candidates and keeps those
+            a fast scikit-learn regressor (retrained each generation on results so far) predicts best;
+            'surrogate_fraction' (default 0.8) of slots go to predicted-best, the remainder to weighted-random for exploration;
+            'surrogate_max_family_fraction' (default 0.35) caps how much of the total selected candidates a single model can take, so the
+            surrogate cannot collapse the search onto whichever cheap model family it is most confident about;
+            requires 'surrogate_min_rows' (default 50) completed results before it activates.
+            Use {"mutation": False, "anneal": False} to reproduce the previous search behavior exactly.
 
     Attributes:
         best_model (pd.DataFrame): DataFrame containing template for the best ranked model
@@ -240,6 +256,7 @@ class AutoTS(object):
         ] = None,
         verbose: int = 1,
         n_jobs: float = 0.5,
+        genetic_params: dict = None,
     ):
         assert forecast_length > 0, "forecast_length must be greater than 0"
         # assert transformer_max_depth > 0, "transformer_max_depth must be greater than 0"
@@ -279,6 +296,8 @@ class AutoTS(object):
         self.force_gc = force_gc
         self.horizontal_ensemble_validation = horizontal_ensemble_validation
         self.custom_metric = custom_metric
+        # validates unknown keys at construction time
+        self.genetic_params = resolve_genetic_params(genetic_params)
         self.validate_import = None
         self.best_model_original = None
         self.best_model_original_id = None
@@ -1007,6 +1026,19 @@ class AutoTS(object):
             "preclean": preclean_choice,
             "metric_weighting": metric_weighting,
             "horizontal_ensemble_validation": horizontal_ensemble_validation,
+            "genetic_params": random.choices(
+                [
+                    None,
+                    {"surrogate": True},
+                    {"mutation": False, "anneal": False},
+                    {
+                        "mutation_probability": 0.5,
+                        "surrogate": True,
+                        "surrogate_oversample": 2,
+                    },
+                ],
+                [0.7, 0.1, 0.1, 0.1],
+            )[0],
         }
 
     def best_model_str_val_results(self):
@@ -1455,6 +1487,15 @@ class AutoTS(object):
                 self.score_per_series = generate_score_per_series(
                     self.initial_results, self.metric_weighting, 1
                 )
+            if self.genetic_params.get('anneal', True):
+                generation_progress = compute_generation_progress(
+                    current_generation,
+                    self.max_generations,
+                    passedTime,
+                    self.generation_timeout,
+                )
+            else:
+                generation_progress = None
             new_template = NewGeneticTemplate(
                 self.initial_results.model_results,
                 submitted_parameters=submitted_parameters,
@@ -1469,6 +1510,8 @@ class AutoTS(object):
                 models_mode=self.models_mode,
                 score_per_series=self.score_per_series,
                 model_list=self.model_list,
+                genetic_params=self.genetic_params,
+                generation_progress=generation_progress,
             )
             submitted_parameters = pd.concat(
                 [submitted_parameters, new_template],

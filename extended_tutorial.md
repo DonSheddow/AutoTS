@@ -12,6 +12,7 @@
 * [Installation](https://winedarksea.github.io/AutoTS/build/html/source/tutorial.html#installation-and-dependency-versioning)
 * [Caveats](https://winedarksea.github.io/AutoTS/build/html/source/tutorial.html#caveats-and-advice)
 * [Adding Regressors](https://winedarksea.github.io/AutoTS/build/html/source/tutorial.html#adding-regressors-and-other-information)
+* [Tuning the Genetic Search](https://winedarksea.github.io/AutoTS/build/html/source/tutorial.html#tuning-the-genetic-search)
 * [Simulation Forecasting](https://winedarksea.github.io/AutoTS/build/html/source/tutorial.html#id8)
 * [Event Risk Forecasting](https://winedarksea.github.io/AutoTS/build/html/source/tutorial.html#id9)
 * [Models](https://winedarksea.github.io/AutoTS/build/html/source/tutorial.html#id10)
@@ -554,6 +555,20 @@ print(model)
 For models here in the lower level api, confusingly, regression_type="User" must be specified as well as passing future_regressor. Why? This allows the model search to easily try both with and without the regressor, because sometimes the regressor may do more harm than good.
 
 Keep in mind that no preprocessing/transformers are done on regressors in most cases here, so it is recommended to clean the regressors of anomalies, and often it may be helpful to deseasonalize and scale the regressors as well.
+
+### Tuning the Genetic Search
+The search for new model parameters between generations can be tuned with the `genetic_params` dict. Three mechanisms are available:
+* **mutation** (on by default): numeric parameters of surviving models are occasionally nudged slightly, allowing fine-tuning around configurations that already work, in addition to the usual crossover and fresh random draws. Each nudge is confined to the value range that model's own parameter sampler produces, so a mutated model can never be pushed to a slower/more extreme configuration than random search would itself have tried.
+* **anneal** (on by default): early generations favor fresh random parents (exploration) while later generations favor the best models found so far (exploitation), scaled by how much of `max_generations` or `generation_timeout` has been used.
+* **surrogate** (off by default): breeds `surrogate_oversample` (default 3) times more candidate models each generation, then a fast scikit-learn regressor, retrained each generation on all results so far, predicts which candidates are worth actually evaluating. Only the predicted-best `surrogate_fraction` (default 0.8) plus some random picks are run, and no single model family may take more than `surrogate_max_family_fraction` (default 0.35) of the total selected candidates, so the ranker can't collapse the search onto whichever cheap model it's most confident about. This spends a bit of overhead per generation to avoid wasting model fits on unpromising parameters, which is usually a good trade on larger datasets where each model evaluation is slow. It activates once `surrogate_min_rows` (default 50) results have accumulated.
+
+```python
+model = AutoTS(
+	forecast_length=14,
+	genetic_params={"surrogate": True},
+)
+```
+Any subset of keys may be passed. Use `genetic_params={"mutation": False, "anneal": False}` to reproduce the previous (pre-mutation) search behavior exactly.
 
 ## Simulation Forecasting
 Simulation forecasting allows for experimenting with different potential future scenarios to examine the potential effects on the forecast. 

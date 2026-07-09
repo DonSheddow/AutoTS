@@ -31,6 +31,14 @@ from autots.models.model_list import (
     # model_lists,
     model_list_to_dict,
 )
+from autots.evaluator.genetic_operators import (
+    resolve_genetic_params,
+    perturb_params,
+    annealed_parent_weights,
+    surrogate_select_candidates,
+    numeric_bounds_from_samples,
+    transformation_numeric_bounds,
+)
 from itertools import zip_longest
 from autots.models.basics import (
     MotifSimulation,
@@ -2740,10 +2748,14 @@ def dict_recombination(a: dict, b: dict):
     return c
 
 
-def trans_dict_recomb(dict_array):
+def trans_dict_recomb(dict_array, weights=None):
     """Recombine two transformation param dictionaries from array of dicts."""
     empty_trans = (None, {})
-    a, b = random.sample(dict_array, 2)
+    if weights is None:
+        a, b = random.sample(dict_array, 2)
+    else:
+        idx = np.random.choice(len(dict_array), size=2, replace=False, p=weights)
+        a, b = dict_array[idx[0]], dict_array[idx[1]]
 
     na_choice = random.sample([a, b], 1)[0].get('fillna', None)
 
@@ -2776,6 +2788,8 @@ def _trans_dicts(
     transformer_list: dict = {},
     transformer_max_depth: int = 8,
     first_transformer: dict = None,
+    mutation_probability: float = 0.0,
+    parent_weights=None,
 ):
     if first_transformer is None:
         first_transformer = json.loads(
@@ -2807,7 +2821,17 @@ def _trans_dicts(
             transformer_max_depth=transformer_max_depth,
         )
     arr = [first_transformer, sec, best, r, r2]
-    trans_dicts = [json.dumps(trans_dict_recomb(arr)) for _ in range(n)]
+    trans_dicts = []
+    for _ in range(n):
+        child = trans_dict_recomb(arr, weights=parent_weights)
+        if mutation_probability > 0 and random.random() < mutation_probability:
+            # perturb_params deepcopies, so parent dicts shared by reference
+            # through trans_dict_recomb are never corrupted. bounds confine
+            # each step's numeric params to that transformer's sampled range
+            child = perturb_params(
+                child, bounds=transformation_numeric_bounds(child)
+            )
+        trans_dicts.append(json.dumps(child))
     return trans_dicts
 
 
@@ -2831,6 +2855,8 @@ def NewGeneticTemplate(
     score_per_series=None,
     recursive_count=0,
     model_list=None,
+    genetic_params: dict = None,
+    generation_progress: float = None,
     # UPDATE RECURSIVE section if adding or removing params
 ):
     """
@@ -2841,9 +2867,18 @@ def NewGeneticTemplate(
     Args:
         model_results (pandas.DataFrame): models that have actually been run
         submitted_paramters (pandas.DataFrame): models tried (may have returned different parameters to results)
+        genetic_params (dict): mutation/anneal/surrogate options, see genetic_operators.GENETIC_PARAMS_DEFAULTS
+        generation_progress (float): fraction of search budget used, drives annealing when not None
 
     """
     new_template_list = []
+    gp = resolve_genetic_params(genetic_params)
+    mutation_probability = gp['mutation_probability'] if gp['mutation'] else 0.0
+    progress = generation_progress if gp['anneal'] else None
+    trans_parent_weights = annealed_parent_weights('transformer', progress)
+    model_parent_weights = annealed_parent_weights('model_recombination', progress)
+    # fractional max_results keeps the legacy sampling path
+    use_surrogate = gp['surrogate'] and max_results >= 1
     if model_list is None:
         model_list = model_results['Model'].unique().tolist()
 
@@ -2896,8 +2931,13 @@ def NewGeneticTemplate(
 
     best = json.loads(sorted_results.iloc[0, :]['TransformationParameters'])
 
-    # best models make more kids
-    n_list = sorted([1, 2, 3] * int((sorted_results.shape[0] / 3) + 1), reverse=True)
+    # best models make more kids; surrogate mode breeds extra to rank and cull
+    child_multiplier = gp['surrogate_oversample'] if use_surrogate else 1
+    n_list = sorted(
+        [i * child_multiplier for i in [1, 2, 3]]
+        * int((sorted_results.shape[0] / 3) + 1),
+        reverse=True,
+    )
     counter = 0
     # begin the breeding
     sidx = {name: i for i, name in enumerate(list(sorted_results), start=1)}
@@ -2923,6 +2963,8 @@ def NewGeneticTemplate(
                 transformer_list=transformer_list,
                 transformer_max_depth=transformer_max_depth,
                 first_transformer=trans_params,
+                mutation_probability=mutation_probability,
+                parent_weights=trans_parent_weights,
             )
             new_template_list.append(
                 pd.DataFrame(
@@ -2944,6 +2986,8 @@ def NewGeneticTemplate(
                 transformer_list=transformer_list,
                 transformer_max_depth=transformer_max_depth,
                 first_transformer=trans_params,
+                mutation_probability=mutation_probability,
+                parent_weights=trans_parent_weights,
             )
             # select the best model of this type
             # fir = json.loads(current_ops.iloc[0, :]['ModelParameters'])
@@ -2969,12 +3013,26 @@ def NewGeneticTemplate(
             r2 = ModelMonster(model_type).get_new_params(method=models_mode)
             arr = np.array([fir, sec, r2, r])
             model_dicts = list()
+            # bound mutation to this model's own sampled parameter range
+            model_bounds = (
+                numeric_bounds_from_samples(
+                    lambda: ModelMonster(model_type).get_new_params(
+                        method=models_mode
+                    )
+                )
+                if mutation_probability > 0
+                else None
+            )
             # recombine best and random to create new generation
             for _ in range(n):
-                r_sel = np.random.choice(arr, size=2, replace=False)
+                r_sel = np.random.choice(
+                    arr, size=2, replace=False, p=model_parent_weights
+                )
                 a = r_sel[0]
                 b = r_sel[1]
                 c = dict_recombination(a, b)
+                if mutation_probability > 0 and random.random() < mutation_probability:
+                    c = perturb_params(c, bounds=model_bounds)
                 model_dicts.append(json.dumps(c))
             new_template_list.append(
                 pd.DataFrame(
@@ -2996,13 +3054,32 @@ def NewGeneticTemplate(
                 transformer_list=transformer_list,
                 transformer_max_depth=transformer_max_depth,
                 first_transformer=trans_params,
+                mutation_probability=mutation_probability,
+                parent_weights=trans_parent_weights,
             )
             model_dicts = list()
             c0 = json.loads(model_params)
-            for _ in range(n):
-                c = random.choice(
-                    [c0, ModelMonster(model_type).get_new_params(method=models_mode)]
+            model_bounds = (
+                numeric_bounds_from_samples(
+                    lambda: ModelMonster(model_type).get_new_params(
+                        method=models_mode
+                    )
                 )
+                if mutation_probability > 0
+                else None
+            )
+            for _ in range(n):
+                fresh = ModelMonster(model_type).get_new_params(method=models_mode)
+                if mutation_probability > 0:
+                    choices = [c0, fresh, perturb_params(c0, bounds=model_bounds)]
+                    weights = annealed_parent_weights('keep_fresh_mutate', progress)
+                else:
+                    choices = [c0, fresh]
+                    weights = annealed_parent_weights('keep_fresh', progress)
+                if weights is None:
+                    c = random.choice(choices)
+                else:
+                    c = random.choices(choices, weights=weights, k=1)[0]
                 model_dicts.append(json.dumps(c))
             new_template_list.append(
                 pd.DataFrame(
@@ -3053,11 +3130,24 @@ def NewGeneticTemplate(
                 score_per_series=score_per_series,
                 recursive_count=recursive_count,
                 model_list=model_list,
+                genetic_params=gp,
+                generation_progress=generation_progress,
             )
     # enjoy the privilege
     elif new_template.shape[0] < max_results:
         return new_template
     else:
+        if use_surrogate:
+            surrogate_selected = surrogate_select_candidates(
+                new_template,
+                model_results,
+                max_results=max_results,
+                keep_fraction=gp['surrogate_fraction'],
+                min_training_rows=gp['surrogate_min_rows'],
+                max_family_fraction=gp['surrogate_max_family_fraction'],
+            )
+            if surrogate_selected is not None:
+                return surrogate_selected
         if max_results < 1:
             return new_template.sample(
                 frac=max_results,
