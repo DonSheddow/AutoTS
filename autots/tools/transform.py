@@ -2812,9 +2812,7 @@ class MeanDifference(EmptyTransformer):
         Args:
             df (pandas.DataFrame): input dataframe
         """
-        return (df - df.mean(axis=1).shift(self.lag).values[..., None]).fillna(
-            method="bfill"
-        )
+        return (df - df.mean(axis=1).shift(self.lag).values[..., None]).bfill()
 
     def fit_transform(self, df):
         """Fits and Returns Magical DataFrame

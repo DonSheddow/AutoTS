@@ -3914,9 +3914,7 @@ class AutoTS(object):
         # try to make visible (if not quite right) on a short forecast
         if self.forecast_length == 1:
             if plot_df.shape[0] > 3:
-                plot_df.loc[:, 'chosen'] = plot_df['chosen'].fillna(
-                    method='bfill', limit=1
-                )
+                plot_df.loc[:, 'chosen'] = plot_df['chosen'].bfill(limit=1)
         # set Title
         if title is None:
             if subset is not None:
