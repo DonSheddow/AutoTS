@@ -28,7 +28,10 @@ def nan_percentile(in_arr, q, method="linear", axis=0, errors="raise"):
     """
     flag_2d = False
     if in_arr.ndim == 2:
-        arr = np.expand_dims(in_arr, 1)
+        # .copy() guarantees a writeable array; np.expand_dims returns a view,
+        # which is read-only when in_arr is (e.g. pandas copy-on-write values),
+        # breaking the in-place NaN replacement below.
+        arr = np.expand_dims(np.asarray(in_arr), 1).copy()
         flag_2d = True
     else:
         arr = in_arr.copy()

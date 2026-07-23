@@ -8468,7 +8468,10 @@ class GeneralTransformer(object):
         self.transformers[i] = self.retrieve_transformer(
             transformation=transformation,
             df=df,
-            param=self.transformation_params[i],
+            # tolerate templates where transformations has a key missing from
+            # transformation_params (desynced evolved templates); mirrors the
+            # empty-params defaulting done in __init__.
+            param=self.transformation_params.get(i, {}),
             random_seed=self.random_seed,
             n_jobs=self.n_jobs,
             holiday_country=self.holiday_country,
