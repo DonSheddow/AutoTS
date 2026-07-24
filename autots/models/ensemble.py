@@ -1,6 +1,7 @@
 """Tools for generating and forecasting with ensembles of models."""
 
 import re
+import random
 import datetime
 import numpy as np
 import pandas as pd
@@ -1143,6 +1144,100 @@ def _generate_bestn_dict(
     }
 
 
+def _member_set(model_parameters):
+    """Frozenset of component model IDs of one ensemble template row, or None."""
+    try:
+        models = json.loads(model_parameters).get('models')
+    except Exception:
+        return None
+    return frozenset(models.keys()) if models else None
+
+
+def _generate_rank_sampled_ensembles(
+    pool,
+    n_candidates: int = 8,
+    pool_size: int = 25,
+    existing_member_sets=None,
+    min_members: int = 2,
+    max_members: int = 5,
+):
+    """Random BestN candidates drawn from a rank-weighted pool of models.
+
+    Every other recipe in EnsembleTemplateGenerator is a deterministic top-k
+    selection on some metric, which has two consequences over a long run: the
+    ensembles only ever reach the handful of models at the very top of the
+    leaderboard, and two candidates essentially never differ solely in the
+    parameterization of the same model types (the 'unique' recipes take
+    groupby('Model').head(1), the rest take a shared top slice). This samples
+    members from the best `pool_size` models with log-rank weights instead, so
+    a model at rank 20 can be tried alongside the leader and two equally
+    ranked parameterizations of one model type both get a chance.
+
+    The weighting is the same log-rank shape NewGeneticTemplate uses to pick
+    parents. It is deliberately flat across the pool - the strict top of the
+    leaderboard is already covered by every other recipe here, so the value
+    this adds is reaching the models those recipes cannot see.
+
+    Args:
+        pool (pd.DataFrame): candidate models, needs ID/Score/Model and both
+            param columns; ensembles already scored are eligible as members
+        n_candidates (int): how many templates to return, 0 disables
+        pool_size (int): how deep into the leaderboard members may be drawn
+        existing_member_sets (iterable): frozensets of member IDs already
+            generated, so this does not restate a recipe's selection
+        min_members/max_members (int): inclusive bounds on ensemble size
+
+    Returns:
+        list of template row dicts (as from _generate_bestn_dict)
+    """
+    if n_candidates < 1:
+        return []
+    pool = pool[pool['Score'].notna()]
+    if 'Exceptions' in pool.columns:
+        pool = pool[pool['Exceptions'].isna()]
+    pool = pool.sort_values('Score', ascending=True, na_position='last').head(pool_size)
+    n_pool = pool.shape[0]
+    if n_pool < min_members:
+        return []
+    weights = np.log(np.arange(n_pool) + 2)[::-1] + 1
+    weights = weights / weights.sum()
+    ids = pool['ID'].to_numpy()
+    # rank 1 is the worst weight so a mean ensemble still leans on its betters
+    rank_weight = {model_id: n_pool - i for i, model_id in enumerate(ids)}
+    indexed = pool.set_index("ID")[
+        ['Model', 'ModelParameters', 'TransformationParameters']
+    ]
+    seen = set(existing_member_sets or [])
+    rows = []
+    # bounded retries, as collisions get common once the pool is small
+    for _ in range(n_candidates * 5):
+        if len(rows) >= n_candidates:
+            break
+        n_members = random.randint(min_members, min(max_members, n_pool))
+        chosen = np.random.choice(ids, size=n_members, replace=False, p=weights)
+        key = frozenset(chosen.tolist())
+        if key in seen:
+            continue
+        seen.add(key)
+        members = indexed.loc[list(chosen)]
+        point_method = random.choice(["mean", "median", "midhinge", "kalman"])
+        rows.append(
+            _generate_bestn_dict(
+                members,
+                model_name='BestN',
+                model_metric=f"rank_sampled_{len(rows)}",
+                # model_weights are only honored for the mean, see BestNEnsemble
+                model_weights=(
+                    {m: rank_weight[m] for m in members.index}
+                    if point_method == "mean"
+                    else None
+                ),
+                point_method=point_method,
+            )
+        )
+    return rows
+
+
 def mlens_helper(models, models_source="bestn"):
     from autots.models.mlensemble import MLEnsemble
 
@@ -1166,12 +1261,25 @@ def EnsembleTemplateGenerator(
     ensemble: str = "simple",
     score_per_series=None,
     use_validation=False,
+    n_rank_sampled: int = 8,
+    rank_pool_size: int = 25,
 ):
-    """Generate class 1 (non-horizontal) ensemble templates given a table of results."""
+    """Generate class 1 (non-horizontal) ensemble templates given a table of results.
+
+    Args:
+        n_rank_sampled (int): additional randomly composed BestN candidates whose
+            members are drawn rank-weighted from the top `rank_pool_size` models
+            rather than by a fixed top-k recipe, 0 to disable
+            (see _generate_rank_sampled_ensembles)
+        rank_pool_size (int): how deep into the leaderboard those members may reach
+    """
     ensemble_templates = pd.DataFrame()
     ens_temp = initial_results.model_results.drop_duplicates(subset='ID')
     # filter out horizontal ensembles
     ens_temp = ens_temp[ens_temp['Ensemble'] <= 1]
+    # ens_temp is narrowed to one row per model type partway through, so the
+    # rank sampler keeps its own handle on the full candidate pool
+    full_pool = ens_temp
     if 'simple' in ensemble or "mlensemble" in ensemble:
         # best 3, all can be of same model type
         best3nonunique = ens_temp.nsmallest(3, columns=['Score']).set_index("ID")[
@@ -1458,8 +1566,6 @@ def EnsembleTemplateGenerator(
         )
     if 'subsample' in ensemble:
         try:
-            import random
-
             if score_per_series is None:
                 per_series = initial_results.per_series_mae
             else:
@@ -1515,6 +1621,31 @@ def EnsembleTemplateGenerator(
                 )
         except Exception as e:
             print(f"subsample ensembling failed with error: {repr(e)}")
+
+    if n_rank_sampled and ('simple' in ensemble or "mlensemble" in ensemble):
+        try:
+            if ensemble_templates.empty:
+                already = []
+            else:
+                already = [
+                    s
+                    for s in ensemble_templates['ModelParameters'].map(_member_set)
+                    if s is not None
+                ]
+            sampled = _generate_rank_sampled_ensembles(
+                full_pool,
+                n_candidates=n_rank_sampled,
+                pool_size=rank_pool_size,
+                existing_member_sets=already,
+            )
+            if sampled:
+                ensemble_templates = pd.concat(
+                    [ensemble_templates, pd.DataFrame(sampled)],
+                    axis=0,
+                    ignore_index=True,
+                )
+        except Exception as e:
+            print(f"rank sampled ensembling failed with error: {repr(e)}")
 
     return ensemble_templates
 

@@ -26,6 +26,8 @@ GENETIC_PARAMS_DEFAULTS = {
     'surrogate_fraction': 0.8,
     'surrogate_min_rows': 50,
     'surrogate_max_family_fraction': 0.35,
+    'ensemble_rank_sampled': 8,
+    'ensemble_rank_pool': 25,
 }
 
 

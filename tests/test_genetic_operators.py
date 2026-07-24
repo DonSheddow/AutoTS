@@ -3,6 +3,7 @@
 import unittest
 import json
 import random
+from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
@@ -10,6 +11,11 @@ import pandas as pd
 from autots import AutoTS
 from autots.datasets import load_artificial
 from autots.evaluator.auto_model import ModelMonster, NewGeneticTemplate
+from autots.models.ensemble import (
+    EnsembleTemplateGenerator,
+    _generate_rank_sampled_ensembles,
+    _member_set,
+)
 from autots.tools.transform import RandomTransform
 from autots.evaluator.genetic_operators import (
     GENETIC_PARAMS_DEFAULTS,
@@ -475,6 +481,140 @@ class GeneticOperatorsTest(unittest.TestCase):
         pd.testing.assert_frame_equal(
             first.reset_index(drop=True), second.reset_index(drop=True)
         )
+
+
+class RankSampledEnsembleTest(unittest.TestCase):
+    """The rank-weighted stochastic member sampler for simple ensembles."""
+
+    def setUp(self):
+        random.seed(2022)
+        np.random.seed(2022)
+
+    def make_pool(self, n=40, models=None):
+        results = fake_model_results(
+            n_per_model=n // (len(models) if models else 5) + 1, models=models
+        )
+        results = results.head(n).reset_index(drop=True)
+        # object dtype so tests can mark rows as failed; an all-NaN Exceptions
+        # column would otherwise be float64
+        results['Exceptions'] = results['Exceptions'].astype(object)
+        # the weighted metrics EnsembleTemplateGenerator's recipes select on
+        for metric in ['smape', 'rmse', 'spl', 'made']:
+            results[f"{metric}_weighted"] = results['Score'] * 0.9 + np.arange(
+                results.shape[0]
+            )
+        return results
+
+    def member_sets(self, rows):
+        return [_member_set(r['ModelParameters']) for r in rows]
+
+    def test_returns_well_formed_templates(self):
+        pool = self.make_pool()
+        rows = _generate_rank_sampled_ensembles(pool, n_candidates=8, pool_size=25)
+        self.assertEqual(len(rows), 8)
+        top25 = set(pool.sort_values('Score').head(25)['ID'])
+        for row in rows:
+            self.assertEqual(row['Model'], 'Ensemble')
+            self.assertEqual(row['Ensemble'], 1)
+            params = json.loads(row['ModelParameters'])
+            members = params['models']
+            self.assertEqual(params['model_count'], len(members))
+            self.assertTrue(2 <= len(members) <= 5)
+            # members must come from the sanctioned pool depth only
+            self.assertTrue(set(members).issubset(top25))
+            for member in members.values():
+                self.assertEqual(
+                    set(member),
+                    {'Model', 'ModelParameters', 'TransformationParameters'},
+                )
+                json.loads(member['ModelParameters'])
+
+    def test_reaches_past_the_top_k(self):
+        """The point of the operator: models the fixed recipes never see."""
+        pool = self.make_pool(n=40)
+        ranked = list(pool.sort_values('Score')['ID'])
+        rank_of = {model_id: i for i, model_id in enumerate(ranked)}
+        rows = _generate_rank_sampled_ensembles(pool, n_candidates=20, pool_size=25)
+        used = set().union(*self.member_sets(rows))
+        self.assertGreater(max(rank_of[m] for m in used), 10)
+        # and it is not merely sampling the tail either
+        self.assertLess(min(rank_of[m] for m in used), 5)
+
+    def test_can_vary_parameterization_of_one_model_type(self):
+        """The axis the top-k recipes structurally cannot explore."""
+        pool = self.make_pool(n=20, models=['ETS'])
+        rows = _generate_rank_sampled_ensembles(pool, n_candidates=10, pool_size=20)
+        sets = self.member_sets(rows)
+        self.assertGreater(len(set(sets)), 5)
+
+    def test_deduplicates_against_existing_and_itself(self):
+        pool = self.make_pool()
+        first = _generate_rank_sampled_ensembles(pool, n_candidates=6, pool_size=25)
+        existing = self.member_sets(first)
+        self.assertEqual(len(set(existing)), len(existing))
+        second = _generate_rank_sampled_ensembles(
+            pool, n_candidates=6, pool_size=25, existing_member_sets=existing
+        )
+        self.assertTrue(set(self.member_sets(second)).isdisjoint(existing))
+
+    def test_model_weights_only_for_mean(self):
+        pool = self.make_pool()
+        rows = _generate_rank_sampled_ensembles(pool, n_candidates=25, pool_size=25)
+        methods = set()
+        for row in rows:
+            params = json.loads(row['ModelParameters'])
+            methods.add(params['point_method'])
+            if params['point_method'] == 'mean':
+                # BestNEnsemble ignores weights for any other point method
+                self.assertEqual(set(params['model_weights']), set(params['models']))
+            else:
+                self.assertNotIn('model_weights', params)
+        self.assertGreater(len(methods), 1)
+
+    def test_degenerate_inputs(self):
+        pool = self.make_pool()
+        self.assertEqual(_generate_rank_sampled_ensembles(pool, n_candidates=0), [])
+        # too few candidates to form even the smallest ensemble
+        self.assertEqual(
+            _generate_rank_sampled_ensembles(pool.head(1), n_candidates=5), []
+        )
+        # failed and unscored models are never eligible members
+        poisoned = pool.copy()
+        poisoned.loc[poisoned.index[:20], 'Exceptions'] = "boom"
+        poisoned.loc[poisoned.index[20:30], 'Score'] = np.nan
+        rows = _generate_rank_sampled_ensembles(poisoned, n_candidates=5, pool_size=25)
+        healthy = set(poisoned.iloc[30:]['ID'])
+        for members in self.member_sets(rows):
+            self.assertTrue(members.issubset(healthy))
+
+    def test_generator_appends_sampled_candidates(self):
+        pool = self.make_pool(n=40)
+        pool['per_series_mae'] = None
+        results = SimpleNamespace(
+            model_results=pool,
+            per_series_mae=pd.DataFrame(
+                np.random.rand(pool.shape[0], 3),
+                index=pool['ID'],
+                columns=['a', 'b', 'c'],
+            ),
+        )
+        baseline = EnsembleTemplateGenerator(
+            results, ensemble=['simple'], n_rank_sampled=0
+        )
+        with_sampled = EnsembleTemplateGenerator(
+            results, ensemble=['simple'], n_rank_sampled=8
+        )
+        self.assertEqual(with_sampled.shape[0], baseline.shape[0] + 8)
+        metrics = with_sampled['ModelParameters'].map(
+            lambda p: json.loads(p).get('model_metric', '')
+        )
+        self.assertEqual(metrics.str.startswith('rank_sampled_').sum(), 8)
+        # the added candidates genuinely widen the pool of models ensembled
+        def used(template):
+            sets = [s for s in template['ModelParameters'].map(_member_set) if s]
+            return set().union(*sets)
+
+        self.assertGreater(len(used(with_sampled)), len(used(baseline)))
 
 
 class GeneticE2ETest(unittest.TestCase):

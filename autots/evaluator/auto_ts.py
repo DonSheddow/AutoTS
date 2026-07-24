@@ -178,7 +178,10 @@ class AutoTS(object):
             'surrogate_max_family_fraction' (default 0.35) caps how much of the total selected candidates a single model can take, so the
             surrogate cannot collapse the search onto whichever cheap model family it is most confident about;
             requires 'surrogate_min_rows' (default 50) completed results before it activates.
-            Use {"mutation": False, "anneal": False} to reproduce the previous search behavior exactly.
+            'ensemble_rank_sampled' (default 8) adds that many randomly composed simple ensembles alongside the fixed
+            top-k recipes, with members drawn rank-weighted from the best 'ensemble_rank_pool' (default 25) models, so
+            ensembles can reach past the few leaderboard-topping models the recipes are confined to;
+            Use {"mutation": False, "anneal": False, "ensemble_rank_sampled": 0} to reproduce the previous search behavior exactly.
 
     Attributes:
         best_model (pd.DataFrame): DataFrame containing template for the best ranked model
@@ -1030,7 +1033,11 @@ class AutoTS(object):
                 [
                     None,
                     {"surrogate": True},
-                    {"mutation": False, "anneal": False},
+                    {
+                        "mutation": False,
+                        "anneal": False,
+                        "ensemble_rank_sampled": 0,
+                    },
                     {
                         "mutation_probability": 0.5,
                         "surrogate": True,
@@ -1548,6 +1555,8 @@ class AutoTS(object):
                     forecast_length=self.forecast_length,
                     ensemble=self.ensemble,
                     score_per_series=self.score_per_series,
+                    n_rank_sampled=self.genetic_params['ensemble_rank_sampled'],
+                    rank_pool_size=self.genetic_params['ensemble_rank_pool'],
                 )
                 if not ensemble_templates.empty:
                     self._run_template(
@@ -1611,6 +1620,8 @@ class AutoTS(object):
                         forecast_length=self.forecast_length,
                         ensemble=self.ensemble,
                         score_per_series=self.score_per_series,
+                        n_rank_sampled=self.genetic_params['ensemble_rank_sampled'],
+                        rank_pool_size=self.genetic_params['ensemble_rank_pool'],
                     )
                     self.ensemble_templates = ensemble_templates
                     if not ensemble_templates.empty:
