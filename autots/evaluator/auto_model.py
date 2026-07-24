@@ -3160,6 +3160,22 @@ def NewGeneticTemplate(
             )
 
 
+def _safe_idxminmax(df, which="min", axis=1):
+    """Row-wise idxmin/idxmax that returns NaN for all-NA rows instead of raising.
+
+    pandas >= 2.x raises ``ValueError: Encountered all NA values`` from
+    ``idxmin``/``idxmax`` when a reduced row/column is entirely NA (older
+    versions returned NaN with a FutureWarning). Guard against it so a single
+    fully-failed series/model doesn't blow up validation aggregation.
+    """
+    valid = df.notna().any(axis=axis)
+    result = pd.Series(np.nan, index=df.index, dtype=object)
+    if valid.any():
+        subset = df.loc[valid] if axis == 1 else df.loc[:, valid]
+        result.loc[valid] = getattr(subset, f"idx{which}")(axis=axis)
+    return result
+
+
 def validation_aggregation(
     validation_results,
     df_train=None,
@@ -3249,18 +3265,18 @@ def validation_aggregation(
     )
     if df_train is not None:
         scaler = df_train.mean(axis=0)
-        scaler[scaler == 0] == np.nan
+        scaler[scaler == 0] = np.nan
         scaler = scaler.fillna(df_train.max(axis=0))
-        scaler[scaler == 0] == 1
+        scaler[scaler == 0] = 1
         per_series = (
             (validation_results.per_series_mae.groupby(level=0).max()) / scaler * 100
         )
         per_series_agg = pd.concat(
             [
                 per_series.min(axis=1).rename("lowest_series_mape"),
-                per_series.idxmin(axis=1).rename("lowest_series_mape_name"),
+                _safe_idxminmax(per_series, "min").rename("lowest_series_mape_name"),
                 per_series.max(axis=1).rename("highest_series_mape"),
-                per_series.idxmax(axis=1).rename("highest_series_mape_name"),
+                _safe_idxminmax(per_series, "max").rename("highest_series_mape_name"),
             ],
             axis=1,
         )
