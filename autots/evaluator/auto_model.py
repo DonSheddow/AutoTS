@@ -1324,6 +1324,46 @@ def unpack_ensemble_models(
     return template
 
 
+def _ensemble_has_no_components(model_str, model_parameters):
+    """True if this template row is an Ensemble that cannot be run."""
+    if model_str != 'Ensemble':
+        return False
+    try:
+        params = (
+            json.loads(model_parameters)
+            if isinstance(model_parameters, str)
+            else model_parameters
+        )
+    except Exception:
+        return True
+    if not isinstance(params, dict):
+        return True
+    return not params.get('models')
+
+
+def drop_empty_ensembles(template, verbose: int = 0):
+    """Remove ensemble rows with no component models from a template.
+
+    Such a row raises on every use (see BestNEnsemble), so it is dropped at the
+    edges (template load/save) rather than allowed in where it could be picked
+    as a best model and only fail at predict time. Historic templates written
+    before component IDs were keyed correctly can contain these.
+    """
+    if template is None or template.empty:
+        return template
+    if 'Model' not in template.columns or 'ModelParameters' not in template.columns:
+        return template
+    empty = [
+        _ensemble_has_no_components(mod, params)
+        for mod, params in zip(template['Model'], template['ModelParameters'])
+    ]
+    if any(empty):
+        if verbose > -1:
+            print(f"Dropping {sum(empty)} ensemble template row(s) with no models")
+        template = template[~np.array(empty)]
+    return template
+
+
 def model_forecast(
     model_name,
     model_param_dict,
@@ -1430,6 +1470,15 @@ def model_forecast(
         ens_template = unpack_ensemble_models(
             template, template_cols, keep_ensemble=False, recursive=False
         )
+        # an ensemble whose 'models' is empty (or which unpacks to nothing) can
+        # only ever fail, and failing here means it is recorded as an exception
+        # during template evaluation instead of blowing up a later .predict()
+        if ens_template.empty:
+            raise ValueError(
+                f"Ensemble {model_param_dict.get('model_name')} "
+                f"({model_param_dict.get('model_metric')}) has no component models "
+                "in its template and cannot be run"
+            )
         # horizontal generalization
         if horizontal_flag == 2:
             profiled = "profile" in model_param_dict.get("model_metric")
@@ -1480,11 +1529,21 @@ def model_forecast(
                     force_gc=force_gc,
                     internal_validation=False,  # allow sub ensembles to have postprocessing
                 )
-                model_id = create_model_id(
-                    df_forecast.model_name,
-                    df_forecast.model_parameters,
-                    df_forecast.transformation_parameters,
-                )
+                # key by the ID this ensemble's template uses for the component,
+                # NOT by a hash of what came back: a component whose parameters
+                # are altered during fit (every nested Ensemble does this, see
+                # BestNEnsemble) hashes to something the ensemble params do not
+                # reference, which silently drops it from 'models' below and
+                # breaks the {series: model_id} lookups of the horizontal and
+                # mosaic ensembles. Fall back to the hash only if unpacking gave
+                # us no ID to use.
+                model_id = row.get('ID')
+                if not isinstance(model_id, str) or not model_id:
+                    model_id = create_model_id(
+                        df_forecast.model_name,
+                        df_forecast.model_parameters,
+                        df_forecast.transformation_parameters,
+                    )
                 total_runtime = (
                     df_forecast.fit_runtime
                     + df_forecast.predict_runtime

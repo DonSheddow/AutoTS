@@ -236,11 +236,16 @@ def BestNEnsemble(
     point_method = ensemble_params.get("point_method", "mean")
     ensemble_params['model_weights'] = model_weights
     ensemble_params['point_method'] = point_method
-    ensemble_params['models'] = {
-        k: v
-        for k, v in dict(ensemble_params.get('models')).items()
-        if k in forecast_keys
-    }
+    template_models = dict(ensemble_params.get('models') or {})
+    if not template_models:
+        raise ValueError("BestN failed, no component models in ensemble template.")
+    surviving = {k: v for k, v in template_models.items() if k in forecast_keys}
+    # these params are what gets recorded in model_results and exported to
+    # templates, so emptying 'models' here would persist an ensemble that can
+    # never be run again. Only narrow it to the components that actually ran;
+    # if none of the keys line up (a bug rather than a failed component, since
+    # a wholly failed ensemble raises just below) keep the template intact.
+    ensemble_params['models'] = surviving if surviving else template_models
 
     model_count = len(forecast_keys)
     if model_count < 1:

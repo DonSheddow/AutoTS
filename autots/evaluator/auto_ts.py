@@ -32,6 +32,7 @@ from autots.evaluator.auto_model import (
     RandomTemplate,
     TemplateWizard,
     unpack_ensemble_models,
+    drop_empty_ensembles,
     generate_score,
     generate_score_per_series,
     model_forecast,
@@ -2124,6 +2125,9 @@ class AutoTS(object):
         additional_msg="",
     ):
         """Get results for one batch of models."""
+        # an ensemble with no components can only produce an exception, and a
+        # scored row for it is what later detonates in predict, so never run one
+        template = drop_empty_ensembles(template, self.verbose)
         # this fillna is the result of a as-of-yet untraced bug producing "null" transformation params
         template["TransformationParameters"] = (
             template["TransformationParameters"].replace("null", "{}").fillna('{}')
@@ -2799,6 +2803,8 @@ class AutoTS(object):
 
     def save_template(self, filename, export_template, **kwargs):
         """Helper function for the save part of export_template."""
+        # never write out an ensemble that has lost all of its components
+        export_template = drop_empty_ensembles(export_template, self.verbose)
         try:
             if filename is None:
                 return export_template
@@ -2837,7 +2843,9 @@ class AutoTS(object):
                         str(import_template.columns), str(self.template_cols_id)
                     )
                 )
-        return import_template
+        # templates written by older versions can contain ensembles whose
+        # components were pruned away, which are unrunnable
+        return drop_empty_ensembles(import_template, self.verbose)
 
     def _enforce_model_list(
         self,
@@ -2970,6 +2978,16 @@ class AutoTS(object):
             template = import_target.copy()
         else:
             template = self.load_template(import_target)
+        # here the row IS the model to be used, so skip past any unrunnable
+        # ensemble rather than failing inside the eventual predict, and say so
+        # plainly if that leaves nothing
+        cleaned = drop_empty_ensembles(template, self.verbose)
+        if not template.empty and cleaned.empty:
+            raise ValueError(
+                "best model template contains only ensembles with no component "
+                "models and cannot be used"
+            )
+        template = cleaned
         if not include_ensemble:
             template = unpack_ensemble_models(
                 template, self.template_cols, keep_ensemble=False, recursive=True
